@@ -1,6 +1,9 @@
 const TelegramBot = require('node-telegram-bot-api')
 const { MongoClient, ServerApiVersion } = require('mongodb')
 
+import axios from 'axios'
+
+console.log(axios)
 
 require('dotenv').config()
 
@@ -29,11 +32,49 @@ const commands: Object[] = [
 
 bot.setMyCommands(commands)
 
-
 const db = client.db('journal_bot')
 
 let usr_msg: any = null
 
+if (process.env.OPENAI_API_KEY == undefined) {
+    console.log('Cannot retrieve OPENAI_API_KEY.')
+    process.exit()
+}
+
+async function checkTextValidity(text: string): Promise<boolean> {
+    const prompt = `Check if the following text is real and makes sense: ${text}`;
+
+    try {
+        const response = await axios.post(
+            'https://api.openai.com/v1/completions',
+            {
+                model: 'gpt-3.5-turbo-instruct',
+                prompt: prompt,
+                max_tokens: 50,
+                temperature: 0.7
+            },
+            {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
+                }
+            }
+        );
+
+        const completion = response.data.choices[0].text.trim();
+        console.log(completion);
+
+        // Simple logic to determine if the response indicates the text is real and makes sense
+        return completion.toLowerCase().includes('yes');
+    } catch (error) {
+        if (axios.isAxiosError(error) && error.response) {
+            console.error('Error checking text validity:', error.response.data);
+        } else {
+            console.error('Error checking text validity:', error.message);
+        }
+        return false;
+    }
+}
 
 async function connectToDB() {
     try {
@@ -59,8 +100,12 @@ async function saveJournalEntry(text: string) {
         id: usr_msg.chat.id,
         entry: text
     }
-
-    db.collection('entries').insertOne(saveData)
+    try {
+        db.collection('entries').insertOne(saveData)
+    }
+    catch (err) {
+        bot.sendMessage(usr_msg.chat.id, err)
+    }
 }
 
 
@@ -78,12 +123,25 @@ async function journal(msg) {
     bot.onReplyToMessage(usr_msg.chat.id, namePrompt.message_id, async (nameMsg) => {
         const text = nameMsg.text
 
-        if (text != null && text.length > 15) {
-            await saveJournalEntry(text)
-            await bot.sendMessage(usr_msg.chat.id, "Успішно збережено у базі даних.")
-        } else {
-            await bot.sendMessage(usr_msg.chat.id, "Гей, розкажи більше! Мені цікаво, що відбулось у тебе за день.")
-            await journal(msg)
+        try {
+            const isValid: boolean = await checkTextValidity(text)
+            console.log(isValid)
+
+            if (text != null && text != "" && text.length > 15 && isValid) {
+                await saveJournalEntry(text)
+                await bot.sendMessage(usr_msg.chat.id, "Успішно збережено у базі даних.")
+            } else if (!isValid) {
+                await bot.sendMessage(usr_msg.chat.id, "Це не справжній текст! Спробуй знову.")
+                await journal(msg)
+            }
+            else {
+                await bot.sendMessage(usr_msg.chat.id, "Гей, розкажи більше! Мені цікаво, що відбулось у тебе за день.")
+                await journal(msg)
+            }
+        }
+
+        catch (err) {
+            console.log(err)
         }
     })
 }
@@ -113,9 +171,4 @@ bot.onText(/\/help/, async msg => {
 
         await bot.sendMessage(msg.chat.id, element)
     }
-})
-
-
-bot.on('text', async msg => {
-    console.log(msg)
 })
